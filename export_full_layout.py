@@ -149,8 +149,8 @@ def to_kle_json_format(keys, author="kf", name="Keyboard Layout"):
             "rx": round(x, 6),  # Rotation center x (absolute position)
             "ry": round(y, 6),  # Rotation center y (absolute position)
             "r": round(r, 2),  # Rotation angle
-            "x": 0.0,  # No offset since this is the first (and only) key in the row
-            "y": 0.0,  # No y offset
+            "x": -0.5,  # Offset to center 1u key at rotation center
+            "y": -0.5,  # Offset to center 1u key at rotation center
         }
         label = str(idx)
         kle_data.append([key_props, label])
