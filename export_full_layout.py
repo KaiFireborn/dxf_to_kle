@@ -13,9 +13,14 @@ KLE_UNIT_MM = 19.05
 
 
 def polygon_center(points):
-    """Return centroid of polygon."""
+    """Return bounding box center of polygon (handles rounded corners correctly)."""
     pts = np.array(points)
-    return pts.mean(axis=0)
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+    # Use bounding box center, not centroid - this handles rounded corners correctly
+    center_x = (np.min(xs) + np.max(xs)) / 2
+    center_y = (np.min(ys) + np.max(ys)) / 2
+    return center_x, center_y
 
 
 def fix_dxf_file(filename):
@@ -231,6 +236,65 @@ def visualize_layout(keys, output_file_path):
         print(f"Warning: Could not create visualization: {e}")
 
 
+def visualize_layout_full_u(keys, output_file_path):
+    """Visualize the keyboard layout with full 1u (19.05mm) keycap size.
+
+    This shows what the layout looks like with actual keycap dimensions.
+    """
+    try:
+        fig, ax = plt.subplots(figsize=(14, 8))
+
+        # Full 1u key size - shows actual keycap dimensions
+        key_size = 1.0  # Full 1u
+
+        # Plot each key
+        for x, y, r in keys:
+            # Create rectangle centered at (x, y)
+            rect = patches.Rectangle(
+                (x - key_size / 2, y - key_size / 2),
+                key_size,
+                key_size,
+                linewidth=1.5,
+                edgecolor="black",
+                facecolor="lightcoral",
+                alpha=0.7,
+                angle=r,
+                rotation_point="center",
+            )
+            ax.add_patch(rect)
+
+            # Add rotation indicator (small line from center)
+            line_len = key_size * 0.4
+            angle_rad = math.radians(r)
+            dx = line_len * math.cos(angle_rad)
+            dy = line_len * math.sin(angle_rad)
+            ax.plot([x, x + dx], [y, y + dy], "darkred", linewidth=2)
+
+        # Set aspect and limits
+        ax.set_aspect("equal")
+        all_x = [k[0] for k in keys]
+        all_y = [k[1] for k in keys]
+        margin = 2
+        ax.set_xlim(min(all_x) - margin, max(all_x) + margin)
+        ax.set_ylim(min(all_y) - margin, max(all_y) + margin)
+        ax.invert_yaxis()
+
+        ax.set_xlabel("X (KLE units, 1u = 19.05mm)")
+        ax.set_ylabel("Y (KLE units, 1u = 19.05mm)")
+        ax.set_title("Keyboard Layout Visualization (Full 1u Keycaps)")
+
+        # Add grid with 1u spacing
+        ax.grid(True, alpha=0.3, linestyle="-", linewidth=0.5)
+        ax.set_axisbelow(True)
+
+        plt.savefig(output_file_path, dpi=150, bbox_inches="tight")
+        print(f"Layout visualization saved to: {output_file_path}")
+        plt.close()
+
+    except Exception as e:
+        print(f"Warning: Could not create visualization: {e}")
+
+
 def get_output_path(filename, output_dir="output"):
     """Get the output directory path and ensure it exists."""
     # Use absolute path of the input file to ensure consistent behavior
@@ -345,6 +409,21 @@ def main(filename):
     visualize_layout(keys_ordered, viz_ordered_file)
     print(
         f"  Visualization (spatially ordered) -> {os.path.basename(viz_ordered_file)}"
+    )
+
+    # Generate full 1u visualizations (keycap size)
+    viz_full_u_file = output_file(output_dir, original_filename, "_layout_full_u.png")
+    visualize_layout_full_u(keys, viz_full_u_file)
+    print(
+        f"  Visualization full 1u (original order) -> {os.path.basename(viz_full_u_file)}"
+    )
+
+    viz_full_u_ordered_file = output_file(
+        output_dir, original_filename, "_layout_full_u_ordered.png"
+    )
+    visualize_layout_full_u(keys_ordered, viz_full_u_ordered_file)
+    print(
+        f"  Visualization full 1u (spatially ordered) -> {os.path.basename(viz_full_u_ordered_file)}"
     )
 
     print("\n=== Key List (Original Order) ===")
