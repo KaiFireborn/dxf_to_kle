@@ -8,19 +8,18 @@ import tempfile
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-# keyboard unit (1u)
 KLE_UNIT_MM = 19.05
+SWITCH_SIZE_MM = 14.0
+MIN_SHAPE_SIZE_MM = 7.6
+DEDUP_TOLERANCE = 0.01
 
 
 def polygon_center(points):
-    """Return bounding box center of polygon (handles rounded corners correctly)."""
+    """Get bounding box center of polygon (handles rounded corners correctly)."""
     pts = np.array(points)
     xs = pts[:, 0]
     ys = pts[:, 1]
-    # Use bounding box center, not centroid - this handles rounded corners correctly
-    center_x = (np.min(xs) + np.max(xs)) / 2
-    center_y = (np.min(ys) + np.max(ys)) / 2
-    return center_x, center_y
+    return (np.min(xs) + np.max(xs)) / 2, (np.min(ys) + np.max(ys)) / 2
 
 
 def fix_dxf_file(filename):
@@ -35,63 +34,50 @@ def fix_dxf_file(filename):
     original_content = content
     content = content.replace("44x\n", "44\n")
 
-    if content != original_content:
-        fd, temp_path = tempfile.mkstemp(suffix=".dxf", text=True)
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(content)
-            print(f"Fixed DXF issues. Using corrected file.")
-            return temp_path
-        except Exception as e:
-            print(f"Error writing fixed DXF: {e}")
-            return filename
+    if content == original_content:
+        return filename
 
-    return filename
+    fd, temp_path = tempfile.mkstemp(suffix=".dxf", text=True)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        return temp_path
+    except Exception as e:
+        print(f"Error writing fixed DXF: {e}")
+        return filename
 
 
 def edge_orientation(points):
     """Estimate rotation from longest edge."""
     longest = 0
     angle = 0
-
     for i in range(len(points)):
         p1 = np.array(points[i])
         p2 = np.array(points[(i + 1) % len(points)])
-
         v = p2 - p1
         length = np.linalg.norm(v)
-
         if length > longest:
             longest = length
             angle = math.degrees(math.atan2(v[1], v[0]))
-
     return angle
 
 
 def process_polyline(entity):
-    """Extract center + rotation from LWPOLYLINE."""
-    points = []
-
-    for v in entity.get_points():
-        x, y = v[0], v[1]
-        points.append((x, y))
-
+    """Extract center and rotation from LWPOLYLINE."""
+    points = [(v[0], v[1]) for v in entity.get_points()]
     if len(points) < 4:
         return None
 
-    # Filter out very small shapes
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     width = max(xs) - min(xs)
     height = max(ys) - min(ys)
 
-    min_size_mm = 7.6
-    if width < min_size_mm or height < min_size_mm:
+    if width < MIN_SHAPE_SIZE_MM or height < MIN_SHAPE_SIZE_MM:
         return None
 
     cx, cy = polygon_center(points)
     rot = edge_orientation(points)
-
     return cx, cy, rot
 
 
@@ -115,20 +101,16 @@ def spatial_distance(key1, key2):
 
 
 def order_keys_spatial(keys):
-    """Reorder keys so adjacent keys in list are spatially close (nearest-neighbor traversal)."""
+    """Reorder keys using nearest-neighbor traversal so adjacent keys are spatially close."""
     if not keys:
-        return keys
+        return keys, []
 
     ordered = []
     remaining = list(range(len(keys)))
-
-    # Start from the key closest to origin (0, 0)
-    start_idx = min(remaining, key=lambda i: spatial_distance(keys[i], (0, 0, 0)))
-    current_idx = start_idx
+    current_idx = min(remaining, key=lambda i: spatial_distance(keys[i], (0, 0, 0)))
     ordered.append(current_idx)
     remaining.remove(current_idx)
 
-    # Greedily add nearest unvisited key
     while remaining:
         nearest_idx = min(
             remaining, key=lambda i: spatial_distance(keys[current_idx], keys[i])
@@ -137,7 +119,6 @@ def order_keys_spatial(keys):
         remaining.remove(nearest_idx)
         current_idx = nearest_idx
 
-    # Return keys in this spatial order with remapped IDs
     return [keys[i] for i in ordered], ordered
 
 
@@ -165,53 +146,45 @@ def to_kle_json_format(keys, author="kf", name="Keyboard Layout"):
 
 def to_simple_format(keys):
     """Convert keys to simple format: just x, y, r for each key."""
-    simple_data = []
-    for x, y, r in keys:
-        simple_data.append(
-            {
-                "x": round(x, 6),
-                "y": round(y, 6),
-                "r": round(r, 2),
-            }
-        )
-    return simple_data
+    return [{"x": round(x, 6), "y": round(y, 6), "r": round(r, 2)} for x, y, r in keys]
 
 
-def visualize_layout(keys, output_file_path):
-    """Visualize the keyboard layout with key positions and rotations.
+def visualize_layout(keys, output_file_path, key_size_u=None):
+    """Visualize keyboard layout. key_size_u=None uses 14mm/19.05mm; 1.0 uses full 1u keycaps."""
+    if key_size_u is None:
+        key_size_u = SWITCH_SIZE_MM / KLE_UNIT_MM
+        facecolor = "lightblue"
+        indicator_color = "r-"
+        title = "Keyboard Layout (14mm Switches in 19.05mm Grid)"
+    else:
+        facecolor = "lightcoral"
+        indicator_color = "darkred"
+        title = "Keyboard Layout (Full 1u Keycaps)"
 
-    Note: Keys are drawn at 14mm / 19.05mm ≈ 0.735u per KLE unit,
-    representing the actual key size in the 1u spacing grid.
-    """
     try:
         fig, ax = plt.subplots(figsize=(14, 8))
-
-        # Actual key size relative to 1u (14mm in 19.05mm grid)
-        key_size = 14.0 / 19.05  # ≈ 0.735u
-
-        # Plot each key
         for x, y, r in keys:
-            # Create rectangle centered at (x, y)
             rect = patches.Rectangle(
-                (x - key_size / 2, y - key_size / 2),
-                key_size,
-                key_size,
+                (x - key_size_u / 2, y - key_size_u / 2),
+                key_size_u,
+                key_size_u,
                 linewidth=1.5,
                 edgecolor="black",
-                facecolor="lightblue",
+                facecolor=facecolor,
+                alpha=0.7 if key_size_u == 1.0 else 1.0,
                 angle=r,
                 rotation_point="center",
             )
             ax.add_patch(rect)
-
-            # Add rotation indicator (small line from center)
-            line_len = key_size * 0.4
+            line_len = key_size_u * 0.4
             angle_rad = math.radians(r)
-            dx = line_len * math.cos(angle_rad)
-            dy = line_len * math.sin(angle_rad)
-            ax.plot([x, x + dx], [y, y + dy], "r-", linewidth=2)
+            ax.plot(
+                [x, x + line_len * math.cos(angle_rad)],
+                [y, y + line_len * math.sin(angle_rad)],
+                indicator_color,
+                linewidth=2,
+            )
 
-        # Set aspect and limits
         ax.set_aspect("equal")
         all_x = [k[0] for k in keys]
         all_y = [k[1] for k in keys]
@@ -219,78 +192,13 @@ def visualize_layout(keys, output_file_path):
         ax.set_xlim(min(all_x) - margin, max(all_x) + margin)
         ax.set_ylim(min(all_y) - margin, max(all_y) + margin)
         ax.invert_yaxis()
-
-        ax.set_xlabel("X (KLE units, 1u = 19.05mm)")
-        ax.set_ylabel("Y (KLE units, 1u = 19.05mm)")
-        ax.set_title("Keyboard Layout Visualization (Keys are 14mm in 19.05mm grid)")
-
-        # Add grid with 1u spacing
+        ax.set_xlabel("X (KLE units)")
+        ax.set_ylabel("Y (KLE units)")
+        ax.set_title(title)
         ax.grid(True, alpha=0.3, linestyle="-", linewidth=0.5)
         ax.set_axisbelow(True)
-
         plt.savefig(output_file_path, dpi=150, bbox_inches="tight")
-        print(f"Layout visualization saved to: {output_file_path}")
         plt.close()
-
-    except Exception as e:
-        print(f"Warning: Could not create visualization: {e}")
-
-
-def visualize_layout_full_u(keys, output_file_path):
-    """Visualize the keyboard layout with full 1u (19.05mm) keycap size.
-
-    This shows what the layout looks like with actual keycap dimensions.
-    """
-    try:
-        fig, ax = plt.subplots(figsize=(14, 8))
-
-        # Full 1u key size - shows actual keycap dimensions
-        key_size = 1.0  # Full 1u
-
-        # Plot each key
-        for x, y, r in keys:
-            # Create rectangle centered at (x, y)
-            rect = patches.Rectangle(
-                (x - key_size / 2, y - key_size / 2),
-                key_size,
-                key_size,
-                linewidth=1.5,
-                edgecolor="black",
-                facecolor="lightcoral",
-                alpha=0.7,
-                angle=r,
-                rotation_point="center",
-            )
-            ax.add_patch(rect)
-
-            # Add rotation indicator (small line from center)
-            line_len = key_size * 0.4
-            angle_rad = math.radians(r)
-            dx = line_len * math.cos(angle_rad)
-            dy = line_len * math.sin(angle_rad)
-            ax.plot([x, x + dx], [y, y + dy], "darkred", linewidth=2)
-
-        # Set aspect and limits
-        ax.set_aspect("equal")
-        all_x = [k[0] for k in keys]
-        all_y = [k[1] for k in keys]
-        margin = 2
-        ax.set_xlim(min(all_x) - margin, max(all_x) + margin)
-        ax.set_ylim(min(all_y) - margin, max(all_y) + margin)
-        ax.invert_yaxis()
-
-        ax.set_xlabel("X (KLE units, 1u = 19.05mm)")
-        ax.set_ylabel("Y (KLE units, 1u = 19.05mm)")
-        ax.set_title("Keyboard Layout Visualization (Full 1u Keycaps)")
-
-        # Add grid with 1u spacing
-        ax.grid(True, alpha=0.3, linestyle="-", linewidth=0.5)
-        ax.set_axisbelow(True)
-
-        plt.savefig(output_file_path, dpi=150, bbox_inches="tight")
-        print(f"Layout visualization saved to: {output_file_path}")
-        plt.close()
-
     except Exception as e:
         print(f"Warning: Could not create visualization: {e}")
 
@@ -311,133 +219,93 @@ def output_file(output_dir, original_filename, suffix):
     return os.path.join(output_dir, basename + suffix)
 
 
-def main(filename):
-    original_filename = filename
-    filename = fix_dxf_file(filename)
+def ensure_subdirs(output_dir):
+    """Create subdirectories for organized export files."""
+    subdirs = {}
+    for subdir in ["kle", "coords", "preview"]:
+        path = os.path.join(output_dir, subdir)
+        os.makedirs(path, exist_ok=True)
+        subdirs[subdir] = path
+    return subdirs
 
-    # Create output directory
-    output_dir = get_output_path(original_filename)
 
-    doc = ezdxf.readfile(filename)
-    msp = doc.modelspace()
+def save_json(filepath, data):
+    """Save data to JSON file."""
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
 
+
+def extract_keys_from_dxf(doc):
+    """Extract keys from DXF document."""
     keys = []
-
-    for e in msp:
-        if e.dxftype() == "LWPOLYLINE":
-            result = process_polyline(e)
-
+    for entity in doc.modelspace():
+        if entity.dxftype() == "LWPOLYLINE":
+            result = process_polyline(entity)
             if result:
                 cx, cy, rot = result
-                # Convert DXF coordinates (in mm) to KLE units (1u = 19.05mm)
                 kle_x = cx / KLE_UNIT_MM
                 kle_y = cy / KLE_UNIT_MM
                 rot = normalize_rotation(rot)
                 keys.append((kle_x, kle_y, rot))
+    return keys
 
-    # Remove duplicates
-    unique_keys = []
+
+def deduplicate_keys(keys):
+    """Remove duplicate keys within tolerance."""
+    unique = []
     for x, y, r in keys:
-        is_duplicate = any(
-            abs(x - ux) < 0.01 and abs(y - uy) < 0.01 for ux, uy, ur in unique_keys
-        )
-        if not is_duplicate:
-            unique_keys.append((x, y, r))
+        if not any(
+            abs(x - ux) < DEDUP_TOLERANCE and abs(y - uy) < DEDUP_TOLERANCE
+            for ux, uy, _ in unique
+        ):
+            unique.append((x, y, r))
+    return unique
 
-    keys = unique_keys
 
-    print(f"\nDetected {len(keys)} keys\n")
+def normalize_to_origin(keys):
+    """Translate keys so minimum coordinates are at origin."""
+    if not keys:
+        return keys
+    all_x = [k[0] for k in keys]
+    all_y = [k[1] for k in keys]
+    min_x, min_y = min(all_x), min(all_y)
+    return [(x - min_x, y - min_y, r) for x, y, r in keys]
 
-    # Normalize coordinates (start from 0,0)
-    if keys:
-        all_x = [k[0] for k in keys]
-        all_y = [k[1] for k in keys]
-        min_x = min(all_x)
-        min_y = min(all_y)
 
-        keys = [(x - min_x, y - min_y, r) for x, y, r in keys]
+def main(filename):
+    original_filename = filename
+    filename = fix_dxf_file(filename)
+    output_dir = get_output_path(original_filename)
+    subdirs = ensure_subdirs(output_dir)
+    basename = os.path.basename(os.path.splitext(original_filename)[0])
 
-    # Order keys spatially (adjacent keys in output are close together)
+    doc = ezdxf.readfile(filename)
+    keys = extract_keys_from_dxf(doc)
+    keys = deduplicate_keys(keys)
+    keys = normalize_to_origin(keys)
     keys_ordered, order_indices = order_keys_spatial(keys)
 
-    # Export as proper KLE JSON format (original order)
+    print(f"Detected {len(keys)} keys\n")
     print("Generating exports...")
-    kle_json = to_kle_json_format(keys, author="kf", name="Lieserl")
-    kle_json_file = output_file(output_dir, original_filename, "_kle.json")
-    with open(kle_json_file, "w") as f:
-        json.dump(kle_json, f, indent=2)
-    print(f"  KLE format JSON (original order) -> {os.path.basename(kle_json_file)}")
 
-    # Export spatially-ordered as proper KLE JSON format
-    kle_json_ordered = to_kle_json_format(
-        keys_ordered, author="kf", name="Lieserl - Spatially Ordered"
-    )
-    kle_json_ordered_file = output_file(
-        output_dir, original_filename, "_kle_ordered.json"
-    )
-    with open(kle_json_ordered_file, "w") as f:
-        json.dump(kle_json_ordered, f, indent=2)
-    print(
-        f"  KLE format JSON (spatially ordered) -> {os.path.basename(kle_json_ordered_file)}"
-    )
+    for keys_set, label in [(keys, ""), (keys_ordered, "_ordered")]:
+        kle_file = os.path.join(subdirs["kle"], f"{basename}_kle{label}.json")
+        save_json(kle_file, to_kle_json_format(keys_set, author="kf", name="Lieserl"))
+        print(f"  kle/{os.path.basename(kle_file)}")
 
-    # Export simple format (just x, y, r for each key)
-    simple_json = to_simple_format(keys)
-    simple_json_file = output_file(output_dir, original_filename, "_coords.json")
-    with open(simple_json_file, "w") as f:
-        json.dump(simple_json, f, indent=2)
-    print(
-        f"  Simple coords JSON (original order) -> {os.path.basename(simple_json_file)}"
-    )
+        coords_file = os.path.join(subdirs["coords"], f"{basename}_coords{label}.json")
+        save_json(coords_file, to_simple_format(keys_set))
+        print(f"  coords/{os.path.basename(coords_file)}")
 
-    simple_json_ordered = to_simple_format(keys_ordered)
-    simple_json_ordered_file = output_file(
-        output_dir, original_filename, "_coords_ordered.json"
-    )
-    with open(simple_json_ordered_file, "w") as f:
-        json.dump(simple_json_ordered, f, indent=2)
-    print(
-        f"  Simple coords JSON (spatially ordered) -> {os.path.basename(simple_json_ordered_file)}"
-    )
+        viz_file = os.path.join(subdirs["preview"], f"{basename}_layout{label}.png")
+        visualize_layout(keys_set, viz_file)
+        print(f"  preview/{os.path.basename(viz_file)}")
 
-    # Generate visualizations
-    viz_file = output_file(output_dir, original_filename, "_layout.png")
-    visualize_layout(keys, viz_file)
-    print(f"  Visualization (original order) -> {os.path.basename(viz_file)}")
-
-    viz_ordered_file = output_file(output_dir, original_filename, "_layout_ordered.png")
-    visualize_layout(keys_ordered, viz_ordered_file)
-    print(
-        f"  Visualization (spatially ordered) -> {os.path.basename(viz_ordered_file)}"
-    )
-
-    # Generate full 1u visualizations (keycap size)
-    viz_full_u_file = output_file(output_dir, original_filename, "_layout_full_u.png")
-    visualize_layout_full_u(keys, viz_full_u_file)
-    print(
-        f"  Visualization full 1u (original order) -> {os.path.basename(viz_full_u_file)}"
-    )
-
-    viz_full_u_ordered_file = output_file(
-        output_dir, original_filename, "_layout_full_u_ordered.png"
-    )
-    visualize_layout_full_u(keys_ordered, viz_full_u_ordered_file)
-    print(
-        f"  Visualization full 1u (spatially ordered) -> {os.path.basename(viz_full_u_ordered_file)}"
-    )
-
-    print("\n=== Key List (Original Order) ===")
-    for i, (x, y, r) in enumerate(keys):
-        print(
-            f"{i:3d}: x={x:.3f}u ({x*KLE_UNIT_MM:.2f}mm), y={y:.3f}u ({y*KLE_UNIT_MM:.2f}mm), rotation={r:.2f}°"
+        viz_full_u_file = os.path.join(
+            subdirs["preview"], f"{basename}_layout_full_u{label}.png"
         )
-
-    print("\n=== Key List (Spatially Ordered - Adjacent Keys are Close) ===")
-    for i, (x, y, r) in enumerate(keys_ordered):
-        orig_id = order_indices[i]
-        print(
-            f"{i:3d} (was {orig_id:2d}): x={x:.3f}u ({x*KLE_UNIT_MM:.2f}mm), y={y:.3f}u ({y*KLE_UNIT_MM:.2f}mm), rotation={r:.2f}°"
-        )
+        visualize_layout(keys_set, viz_full_u_file, key_size_u=1.0)
+        print(f"  preview/{os.path.basename(viz_full_u_file)}")
 
 
 if __name__ == "__main__":
